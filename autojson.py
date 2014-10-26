@@ -34,22 +34,24 @@ def is_struct_jsonable(sd):
 
     return False
 
-jsonables = {}
-def recurse(node, indent = 0):
-    global jsonables
-    def json_packable_struct(node):
-        if node.kind != ck.STRUCT_DECL:
-            return
+def _get_jsonable_structs(root):
+    jsonables = {}
+    def aux(node):
+        def json_packable_struct(node):
+            if node.kind != ck.STRUCT_DECL:
+                return
 
         if is_struct_jsonable(node):
             jsonables[node.spelling] = node
 
-    json_packable_struct(node)
-    for node in node.get_children():
-        recurse(node, indent + 1)
+        json_packable_struct(node)
+        for node in node.get_children():
+            aux(node)
 
 
-    return jsonables
+        return jsonables
+
+    return aux(root)
 
 
 class CantSerializeUnion(Exception):
@@ -238,7 +240,7 @@ def generate_code(input, h_output, c_output):
     for include in includes:
         h_module.stmt('#include {0}'.format(include), suffix = '')
 
-    for struct in recurse(t.cursor).itervalues():
+    for struct in _get_jsonable_structs(t.cursor).itervalues():
         if struct.translation_unit.spelling != input:
             continue
 
