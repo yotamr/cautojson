@@ -238,6 +238,13 @@ def _fini_h_module(m, h_name):
     m.stmt('#endif /* {0} */'.format(h_name), suffix = '')
 
 
+def _init_c_module(input, h_output):
+    m = Module()
+    m.stmt('#include "{0}"'.format(input), suffix = '')
+    m.stmt('#include "{0}"'.format(h_output), suffix = '')
+
+    return m
+
 @click.command()
 @click.argument('input', type=click.Path())
 @click.argument('h_output')
@@ -246,10 +253,8 @@ def generate_code(input, h_output, c_output):
     i = cindex.Index.create()
     t = i.parse(input, args = ["-C"])
 
-    c_module = Module()
+    c_module = _init_c_module(input, h_output)
     h_module, h_name = _init_h_module(input, h_output)
-    c_module.stmt('#include "{0}"'.format(sys.argv[1]), suffix = '')
-    c_module.stmt('#include "{0}"'.format(h_output), suffix = '')
 
     for struct in _get_jsonable_structs(t.cursor).itervalues():
         if struct.translation_unit.spelling != input:
