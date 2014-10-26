@@ -1,7 +1,7 @@
 # Introduction
 
 cautojson is a Python script that takes in as input a series of C
-definition files and automatically creates bindings that serialize and
+header files and automatically creates bindings that serialize and
 parse such structres using JSON.
 
 cautojson currently uses jansoon for serialization and parsing of
