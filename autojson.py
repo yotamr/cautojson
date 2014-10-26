@@ -24,7 +24,20 @@ from clike import *
 import click
 import os
 
-def is_struct_jsonable(sd):
+class CantSerializeUnion(Exception):
+    pass
+
+class CantSerializeAnonymousStruct(Exception):
+    pass
+
+class StructNotJsonable(Exception):
+    pass
+
+class CantManglePtr(Exception):
+    pass
+
+
+def _is_struct_jsonable(sd):
     for field in sd.get_children():
         if field.kind != ck.FIELD_DECL:
             continue
@@ -41,7 +54,7 @@ def _get_jsonable_structs(root):
             if node.kind != ck.STRUCT_DECL:
                 return
 
-        if is_struct_jsonable(node):
+        if _is_struct_jsonable(node):
             jsonables[node.spelling] = node
 
         json_packable_struct(node)
@@ -54,15 +67,6 @@ def _get_jsonable_structs(root):
     return aux(root)
 
 
-class CantSerializeUnion(Exception):
-    pass
-
-class CantSerializeAnonymousStruct(Exception):
-    pass
-
-class StructNotJsonable(Exception):
-    pass
-
 def _validate_struct_decl(sd):
     if sd.type.get_declaration().kind == ck.UNION_DECL:
         raise CantSerializeUnion(sd)
@@ -70,7 +74,7 @@ def _validate_struct_decl(sd):
     if not sd.spelling:
         raise CantSerializeAnonymousStruct(sd.type.spelling)
 
-    if not is_struct_jsonable(sd):
+    if not _is_struct_jsonable(sd):
         raise StructNotJsonable(sd.spelling)
 
 
@@ -88,7 +92,7 @@ def _ignore_field(f):
     else:
         return False
 
-def recursively_gen_serializer(s, mod):
+def recursively__generate_serializer(s, mod):
     BLOCK = mod.block
     STMT = mod.stmt
     DOC = mod.doc
@@ -103,7 +107,7 @@ def recursively_gen_serializer(s, mod):
         for f in fields:
             if _ignore_field(f):
                 continue
-            recursively_gen_serializer(f, mod);
+            recursively__generate_serializer(f, mod);
 
         STMT("return obj");
 
@@ -123,22 +127,19 @@ def recursively_gen_serializer(s, mod):
 
         STMT('json_object_set(obj, "{0}", {1})', s.displayname, field_value)
 
-def quote(s):
+def _quote(s):
     return '"{0}"'.format(s)
 
-class CantManglePtr(Exception):
-    pass
-
-def mangle_ptr(ptr):
+def _mangle_ptr(ptr):
     if 'CRAZYBASTARD' in ptr or 'CRIMINALTRICKER' in ptr:
         raise CantManglePtr(ptr)
-        
+
     return ptr.replace('->', 'CRAZYBASTARD').replace('.', 'CRIMINALTRICKER')
 
-def demangle_ptr(ptr):
+def _demangle_ptr(ptr):
     return ptr.replace('CRAZYBASTARD', '->').replace('CRIMINALTRICKER', '.')
 
-def recursively_gen_parser(s, mod, out, unpack, ptrs):
+def recursively__generate_parser(s, mod, out, unpack, ptrs):
     BLOCK = mod.block
     STMT = mod.stmt
     DOC = mod.doc
@@ -157,30 +158,30 @@ def recursively_gen_parser(s, mod, out, unpack, ptrs):
             if _ignore_field(f):
                 continue
 
-            recursively_gen_parser(f, mod, out, unpack, ptrs);
+            recursively__generate_parser(f, mod, out, unpack, ptrs);
         unpack("}")
 
     if s.kind == ck.FIELD_DECL:
         ct = s.type.get_canonical()
         full_field_name = "{0}{1}".format(out, s.spelling)
-        quoted_field_name = quote(s.spelling)
+        _quoted_field_name = _quote(s.spelling)
         if ct.kind == tk.RECORD:
             sd = ct.get_declaration()
-            unpack("s:", quoted_field_name)
-            recursively_gen_parser(sd, mod, full_field_name + ".", unpack, ptrs)
+            unpack("s:", _quoted_field_name)
+            recursively__generate_parser(sd, mod, full_field_name + ".", unpack, ptrs)
             unpack(", ")
         elif ct.kind == tk.INT or ct.kind == tk.ENUM:
-            unpack("s:i,", quoted_field_name, ptr(full_field_name))
+            unpack("s:i,", _quoted_field_name, ptr(full_field_name))
         elif (ct.kind == tk.CONSTANTARRAY and
               ct.get_array_element_type().kind == tk.CHAR_S):
-            tmp_ptr = mangle_ptr(full_field_name);
+            tmp_ptr = _mangle_ptr(full_field_name);
             STMT('char *{0} = NULL;'.format(tmp_ptr))
             ptrs(tmp_ptr, ct.get_array_size())
-            unpack("s:s,", quoted_field_name, ptr(tmp_ptr))
+            unpack("s:s,", _quoted_field_name, ptr(tmp_ptr))
         else:
             embed()
 
-def gen_parser(s, c_module, h_module):
+def _generate_parser(s, c_module, h_module):
     function_name = 'int {0}(json_t *json, struct {1} *out)'.format(struct_parser_function_name(s),
                                                                     s.displayname)
 
@@ -196,27 +197,45 @@ def gen_parser(s, c_module, h_module):
         def ptrs(ptr_name, buffer_size):
             tmp_str_ptrs.append((ptr_name, buffer_size))
 
-        recursively_gen_parser(s, c_module, "out->", unpack, ptrs)
+        recursively__generate_parser(s, c_module, "out->", unpack, ptrs)
         function_body = 'json_unpack(json, {0}, {1})'.format('"' + ''.join(unpack_str).replace(",}","}") + '"'
                                                             , ', '.join(destinations))
         c_module.stmt("int rc = {0}".format(function_body))
         c_module.stmt('if (0 != rc) { return rc;}')
         for tmp_str_ptr, buffer_size in tmp_str_ptrs:
-            ptr = demangle_ptr(tmp_str_ptr)
+            ptr = _demangle_ptr(tmp_str_ptr)
             c_module.stmt('strncpy({0}, {1}, {2});'.format(ptr, tmp_str_ptr, buffer_size - 1))
 
         c_module.stmt('return 0');
 
 
-def gen_serializer(s, c_module, h_module):
+def _generate_serializer(s, c_module, h_module):
     function_name = 'json_t *{0}(const struct {1} *this)'.format(struct_serializer_function_name(s),
                                                                   s.displayname)
     h_module.stmt("{0}", function_name)
     with c_module.block(function_name):
-        recursively_gen_serializer(s, c_module)
+        recursively__generate_serializer(s, c_module)
 
 
 
+
+
+def _init_h_module(input, h_file):
+    m = Module()
+    h_name = '__{0}_JSON_AUTO__'.format(os.path.basename(input).replace('.', '_').upper())
+    m.stmt('#ifndef {0}'.format(h_name), suffix = '')
+    m.stmt('#define {0}'.format(h_name), suffix = '')
+    includes = ["<jansson.h>",
+                "<string.h>",
+                _quote(input)]
+
+    for include in includes:
+        m.stmt('#include {0}'.format(include), suffix = '')
+
+    return m, h_name
+
+def _fini_h_module(m, h_name):
+    m.stmt('#endif /* {0} */'.format(h_name), suffix = '')
 
 
 @click.command()
@@ -228,26 +247,18 @@ def generate_code(input, h_output, c_output):
     t = i.parse(input, args = ["-C"])
 
     c_module = Module()
-    h_module = Module()
-    h_name = '__{0}_JSON_AUTO__'.format(os.path.basename(input).replace('.', '_').upper())
+    h_module, h_name = _init_h_module(input, h_output)
     c_module.stmt('#include "{0}"'.format(sys.argv[1]), suffix = '')
     c_module.stmt('#include "{0}"'.format(h_output), suffix = '')
-    h_module.stmt('#ifndef {0}'.format(h_name), suffix = '')
-    h_module.stmt('#define {0}'.format(h_name), suffix = '')
-    includes = ["<jansson.h>",
-                "<string.h>",
-                quote(input)]
-    for include in includes:
-        h_module.stmt('#include {0}'.format(include), suffix = '')
 
     for struct in _get_jsonable_structs(t.cursor).itervalues():
         if struct.translation_unit.spelling != input:
             continue
 
-        gen_serializer(struct, c_module, h_module)
-        gen_parser(struct, c_module, h_module)
+        _generate_serializer(struct, c_module, h_module)
+        _generate_parser(struct, c_module, h_module)
 
-    h_module.stmt('#endif /* {0} */'.format(h_name), suffix = '')
+    _fini_h_module(h_module, h_name)
     file(c_output, "wb").write(c_module.render())
     file(h_output, "wb").write(h_module.render())
 
