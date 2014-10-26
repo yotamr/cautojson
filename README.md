@@ -49,7 +49,7 @@ struct struct_a {
 
 ```
 
-To use these structures with JSON, a developer is required to manually
+To use these structures with JSON, a developer is required to manually write
 repetitive code that does the parsing/serialization. In order to indicate to cautojson that
 bindings should be created for a given structure, a JSONABLE magical
 member is declared in the structure. Note that nested structures
