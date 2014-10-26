@@ -150,13 +150,15 @@ int struct_a_from_json(json_t *json, struct struct_a *out)
 5. Generates complete and compilable code
 
 # TODO
-1. Lots of code cleanup
+1. Refactor the code, it got very messy :)
 2. Get rid of the `///>` notation in favor of a more declarative macro
 3. Add some more examples and testers
 4. Add support for json/c arrays
-5. pip support
+5. Integrate with pip
 6. Clearer error messages
 
 # Thanks
 1. Thanks to Tomer Filiba for clike.py, which provides a nice
    contextmanager based approach to code generation
+2. Kudos to the jansson team for creating a well thought-out and
+   straightforward lib
