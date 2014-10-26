@@ -40,7 +40,6 @@ struct struct_a {
     int int_member;
     char string_member[50];
     struct struct_b b;
-    int some_calculated_member;
     enum my_enum e;
     JSONABLE;
 };
