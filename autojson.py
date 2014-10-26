@@ -245,23 +245,23 @@ def _init_c_module(input, h_output):
 
     return m
 
+def _generate_code(input, c_module, h_module):
+    i = cindex.Index.create()
+    t = i.parse(input, args = ["-C"])
+
+    for struct in _get_jsonable_structs(t.cursor).itervalues():
+        _generate_serializer(struct, c_module, h_module)
+        _generate_parser(struct, c_module, h_module)
+
 @click.command()
 @click.argument('input', type=click.Path())
 @click.argument('h_output')
 @click.argument('c_output')
 def generate_code(input, h_output, c_output):
-    i = cindex.Index.create()
-    t = i.parse(input, args = ["-C"])
 
     c_module = _init_c_module(input, h_output)
     h_module, h_name = _init_h_module(input, h_output)
-
-    for struct in _get_jsonable_structs(t.cursor).itervalues():
-        if struct.translation_unit.spelling != input:
-            continue
-
-        _generate_serializer(struct, c_module, h_module)
-        _generate_parser(struct, c_module, h_module)
+    _generate_code(input, c_module, h_module)
 
     _fini_h_module(h_module, h_name)
     file(c_output, "wb").write(c_module.render())
