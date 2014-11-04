@@ -1,6 +1,5 @@
-#ifndef __AUTOJSON_H__
-#define __AUTOJSON_H__
+#pragma once
 
 #define JSONABLE  int __jsonable
 
-#endif
+

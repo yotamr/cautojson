@@ -1,6 +1,8 @@
+#!/usr/bin/python
+
 ##############################################################################
 #
-# Copyright 2011, Yotam Rubin <yotamrubin@gmail.com>
+# Copyright 2014, Yotam Rubin <yotam@wizery.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,17 +49,14 @@ def _is_struct_jsonable(sd):
 
     return False
 
-def _get_jsonable_structs(root):
+struct_jsonable = _is_struct_jsonable
+
+def _get_jsonable_structs(root, h_file):
     jsonables = {}
     def aux(node):
-        def json_packable_struct(node):
-            if node.kind != ck.STRUCT_DECL:
-                return
-
         if _is_struct_jsonable(node):
             jsonables[node.spelling] = node
 
-        json_packable_struct(node)
         for node in node.get_children():
             aux(node)
 
@@ -68,21 +67,23 @@ def _get_jsonable_structs(root):
 
 
 def _validate_struct_decl(sd):
-    if sd.type.get_declaration().kind == ck.UNION_DECL:
+    if sd.type.get_canonical().get_declaration().kind == ck.UNION_DECL:
         raise CantSerializeUnion(sd)
 
     if not sd.spelling:
-        raise CantSerializeAnonymousStruct(sd.type.spelling)
+        raise CantSerializeAnonymousStruct(sd.type.get_canonical().spelling)
 
     if not _is_struct_jsonable(sd):
         raise StructNotJsonable(sd.spelling)
 
 
 def struct_serializer_function_name(sd):
+    sd = sd.type.get_canonical().get_declaration()
     _validate_struct_decl(sd)
     return '{0}_to_json'.format(sd.spelling)
 
 def struct_parser_function_name(sd):
+    sd = sd.type.get_canonical().get_declaration()
     _validate_struct_decl(sd)
     return '{0}_from_json'.format(sd.spelling)
 
@@ -249,7 +250,7 @@ def _generate_code(input, c_module, h_module):
     i = cindex.Index.create()
     t = i.parse(input, args = ["-C"])
 
-    for struct in _get_jsonable_structs(t.cursor).itervalues():
+    for struct in _get_jsonable_structs(t.cursor, input).itervalues():
         _generate_serializer(struct, c_module, h_module)
         _generate_parser(struct, c_module, h_module)
 
@@ -257,14 +258,16 @@ def _generate_code(input, c_module, h_module):
 @click.argument('input', type=click.Path())
 @click.argument('h_output')
 @click.argument('c_output')
-def generate_code(input, h_output, c_output):
-
+@click.option('--interface-only', default=False, is_flag=True)
+def generate_code(interface_only, input, h_output, c_output):
     c_module = _init_c_module(input, h_output)
     h_module, h_name = _init_h_module(input, h_output)
     _generate_code(input, c_module, h_module)
 
     _fini_h_module(h_module, h_name)
-    file(c_output, "wb").write(c_module.render())
+    if not interface_only:
+        file(c_output, "wb").write(c_module.render())
+
     file(h_output, "wb").write(h_module.render())
 
 if __name__ == '__main__':
