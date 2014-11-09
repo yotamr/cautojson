@@ -53,6 +53,7 @@ struct_jsonable = _is_struct_jsonable
 
 def _get_jsonable_structs(root, h_file):
     jsonables = {}
+    filename = root.translation_unit.spelling
     def aux(node):
         if _is_struct_jsonable(node):
             jsonables[node.spelling] = node
@@ -182,11 +183,14 @@ def recursively__generate_parser(s, mod, out, unpack, ptrs):
         else:
             embed()
 
-def _generate_parser(s, c_module, h_module):
+def _generate_parser(main_filename, s, c_module, h_module):
     function_name = 'int {0}(json_t *json, struct {1} *out)'.format(struct_parser_function_name(s),
                                                                     s.displayname)
 
     h_module.stmt(function_name);
+    if s.location.file.name != main_filename:
+        return
+
     with c_module.block(function_name):
         unpack_str = []
         destinations = []
@@ -210,10 +214,13 @@ def _generate_parser(s, c_module, h_module):
         c_module.stmt('return 0');
 
 
-def _generate_serializer(s, c_module, h_module):
+def _generate_serializer(main_filename, s, c_module, h_module):
     function_name = 'json_t *{0}(const struct {1} *this)'.format(struct_serializer_function_name(s),
                                                                   s.displayname)
     h_module.stmt("{0}", function_name)
+    if s.location.file.name != main_filename:
+        return
+
     with c_module.block(function_name):
         recursively__generate_serializer(s, c_module)
 
@@ -249,10 +256,11 @@ def _init_c_module(input, h_output):
 def _generate_code(input, c_module, h_module):
     i = cindex.Index.create()
     t = i.parse(input, args = ["-C"])
+    main_filename = t.spelling
 
     for struct in _get_jsonable_structs(t.cursor, input).itervalues():
-        _generate_serializer(struct, c_module, h_module)
-        _generate_parser(struct, c_module, h_module)
+        _generate_serializer(main_filename, struct, c_module, h_module)
+        _generate_parser(main_filename, struct, c_module, h_module)
 
 @click.command()
 @click.argument('input', type=click.Path())
