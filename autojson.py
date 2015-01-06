@@ -25,6 +25,9 @@ from IPython import embed
 from clike import *
 import click
 import os
+from collections import namedtuple
+
+CleanupInfo = namedtuple('CleanupInfo', ['expression', 'label'])
 
 class CantSerializeUnion(Exception):
     pass
@@ -38,6 +41,17 @@ class StructNotJsonable(Exception):
 class CantManglePtr(Exception):
     pass
 
+class CantSerializeConstantArray(Exception):
+    pass
+
+class CantSerializeField(Exception):
+    pass
+
+class CantParseField(Exception):
+    pass
+
+class CantParse(Exception):
+    pass
 
 def _is_struct_jsonable(sd):
     for field in sd.get_children():
@@ -50,6 +64,24 @@ def _is_struct_jsonable(sd):
     return False
 
 struct_jsonable = _is_struct_jsonable
+
+def _is_var_array(t):
+    t = t.get_canonical()
+    if t.kind != tk.POINTER:
+        return False
+
+    if t.get_pointee().kind != tk.POINTER:
+        return False
+
+    pointee = t.get_pointee().get_pointee()
+    if pointee.kind != tk.RECORD:
+        return False
+
+    sd = pointee.get_declaration()
+    return _is_struct_jsonable(sd)
+
+def _is_var_string(t):
+    return False
 
 def _get_jsonable_structs(root, h_file):
     jsonables = {}
@@ -83,6 +115,11 @@ def struct_serializer_function_name(sd):
     _validate_struct_decl(sd)
     return '{0}_to_json'.format(sd.spelling)
 
+def struct_free_function_name(sd):
+    sd = sd.type.get_canonical().get_declaration()
+    _validate_struct_decl(sd)
+    return '{0}_free'.format(sd.spelling)
+
 def struct_parser_function_name(sd):
     sd = sd.type.get_canonical().get_declaration()
     _validate_struct_decl(sd)
@@ -93,6 +130,39 @@ def _ignore_field(f):
         return True
     else:
         return False
+
+def _serialize_record_array(s, sd, full_field_name, loop_fmt, lvalue_modifier, mod):
+    BLOCK = mod.block
+    STMT = mod.stmt
+    array_name = _mangle_ptr(full_field_name) + "_array"
+    STMT('json_t *{0} = json_array()'.format(array_name))
+    struct_serializer_func = struct_serializer_function_name(sd.get_declaration())
+    with BLOCK(loop_fmt.format(full_field_name)):
+        STMT('json_array_append_new({0}, {1}({2}{3}[i]))'.format(array_name,
+                                                             struct_serializer_func,
+                                                             lvalue_modifier,
+                                                             full_field_name))
+
+    return array_name
+
+def _serialize_record_static_array(s, ct, full_field_name, mod):
+    loop_fmt = 'for (int i = 0; i < sizeof({0}) / sizeof({0}[0]); i++)'
+    return _serialize_record_array(s, ct.get_array_element_type().get_canonical(), full_field_name, loop_fmt, '&', mod)
+
+def _serialize_record_var_array(s, ct, full_field_name, mod):
+    loop_fmt = 'for (int i = 0; {0}[i] != 0; i++)'
+    return _serialize_record_array(s, ct.get_pointee().get_pointee(), full_field_name, loop_fmt, '', mod)
+
+
+def _handle_array_serialization(s, ct, full_field_name, mod):
+    element_type_kind = ct.get_array_element_type().kind
+    if not element_type_kind in [tk.CHAR_S, tk.RECORD]:
+        raise CantSerializeConstantArray(s.displayname)
+
+    if element_type_kind == tk.RECORD:
+        raise NotImplemented()
+    elif element_type_kind == tk.CHAR_S:
+        return "json_string({0})".format(full_field_name)
 
 def recursively__generate_serializer(s, mod):
     BLOCK = mod.block
@@ -109,9 +179,9 @@ def recursively__generate_serializer(s, mod):
         for f in fields:
             if _ignore_field(f):
                 continue
-            recursively__generate_serializer(f, mod);
+            recursively__generate_serializer(f, mod)
 
-        STMT("return obj");
+        STMT("return obj")
 
     if s.kind == ck.FIELD_DECL:
         ct = s.type.get_canonical()
@@ -121,16 +191,26 @@ def recursively__generate_serializer(s, mod):
             field_value = '{0}(&{1})'.format(struct_serializer_function_name(sd), full_field_name)
         elif ct.kind == tk.INT or ct.kind == tk.ENUM:
             field_value = "json_integer({0})".format(full_field_name)
-        elif (ct.kind == tk.CONSTANTARRAY and
-              ct.get_array_element_type().kind == tk.CHAR_S):
-            field_value = "json_string({0})".format(full_field_name)
+        elif ct.kind == tk.CONSTANTARRAY:
+            field_value = _handle_array_serialization(s, ct, full_field_name, mod)
+        elif _is_var_array(ct):
+            field_value = _serialize_record_var_array(s, ct, full_field_name, mod)
+        elif _is_var_string(ct):
+            print ct
         else:
-            embed()
+            raise CantSerializeField(s.displayname, ct.kind)
 
         STMT('json_object_set(obj, "{0}", {1})', s.displayname, field_value)
 
 def _quote(s):
     return '"{0}"'.format(s)
+
+def _normalize_typename(typename):
+    typename = typename.replace('*', 'pointer')
+    return typename.translate(None, ' []')
+
+def _normalize_labelname(var):
+    return var.replace('->', '_').replace('.', '_')
 
 def _mangle_ptr(ptr):
     if 'CRAZYBASTARD' in ptr or 'CRIMINALTRICKER' in ptr:
@@ -141,16 +221,7 @@ def _mangle_ptr(ptr):
 def _demangle_ptr(ptr):
     return ptr.replace('CRAZYBASTARD', '->').replace('CRIMINALTRICKER', '.')
 
-def recursively__generate_parser(s, mod, out, unpack, ptrs):
-    BLOCK = mod.block
-    STMT = mod.stmt
-    DOC = mod.doc
-    SEP = mod.sep
-
-    def ptr(field_name):
-        return '&' + field_name
-
-    if s.kind == ck.STRUCT_DECL:
+def recursively__generate_struct_parser(s, mod, out, unpack, add_ptr, add_array):
         unpack("{")
         fields = [f
                   for f in s.get_children()
@@ -160,58 +231,170 @@ def recursively__generate_parser(s, mod, out, unpack, ptrs):
             if _ignore_field(f):
                 continue
 
-            recursively__generate_parser(f, mod, out, unpack, ptrs);
+            recursively__generate_parser(f, mod, out, unpack, add_ptr, add_array)
         unpack("}")
 
+def recursively__generate_field_parser(s, mod, out, unpack, add_ptr, add_array):
+    STMT = mod.stmt
+    BLOCK = mod.block
+
+    def ptr(field_name):
+        return '&' + field_name
+
+    ct = s.type.get_canonical()
+    full_field_name = "{0}{1}".format(out, s.spelling)
+    _quoted_field_name = _quote(s.spelling)
+    if ct.kind == tk.RECORD:
+        sd = ct.get_declaration()
+        unpack("s:", _quoted_field_name)
+        recursively__generate_parser(sd, mod, full_field_name + ".", unpack, add_ptr, add_array)
+        unpack(", ")
+    elif ct.kind == tk.INT or ct.kind == tk.ENUM:
+        unpack("s:i,", _quoted_field_name, ptr(full_field_name))
+    elif (ct.kind == tk.CONSTANTARRAY and
+          ct.get_array_element_type().kind == tk.CHAR_S):
+        tmp_ptr = _mangle_ptr(full_field_name)
+        STMT('char *{0} = NULL;'.format(tmp_ptr))
+        add_ptr(tmp_ptr, ct.get_array_size())
+        unpack("s:s,", _quoted_field_name, ptr(tmp_ptr))
+    elif (ct.kind == tk.CONSTANTARRAY and
+          ct.get_array_element_type().get_canonical().kind == tk.RECORD):
+        raise NotImplemented()
+        # tmp_json_obj = _mangle_ptr(full_field_name)
+        # unpack("s:[{0}]", _quoted_field_name, ptr(tmp_json_obj))
+        # add_array(tmp_json_obj, ct)
+    elif _is_var_array(ct):
+        #raise NotImplemented()
+        tmp_json_obj = _mangle_ptr(full_field_name)
+        STMT('json_t *{0} = NULL'.format(tmp_json_obj))
+        unpack("s:o", _quoted_field_name, ptr(tmp_json_obj))
+        add_array(tmp_json_obj, ct)
+    else:
+        raise CantParseField(s.spelling)
+
+
+def recursively__generate_parser(s, mod, out, unpack, add_ptr, add_array):
+    if s.kind == ck.STRUCT_DECL:
+        return recursively__generate_struct_parser(s, mod, out, unpack, add_ptr, add_array)
+
     if s.kind == ck.FIELD_DECL:
-        ct = s.type.get_canonical()
-        full_field_name = "{0}{1}".format(out, s.spelling)
-        _quoted_field_name = _quote(s.spelling)
-        if ct.kind == tk.RECORD:
-            sd = ct.get_declaration()
-            unpack("s:", _quoted_field_name)
-            recursively__generate_parser(sd, mod, full_field_name + ".", unpack, ptrs)
-            unpack(", ")
-        elif ct.kind == tk.INT or ct.kind == tk.ENUM:
-            unpack("s:i,", _quoted_field_name, ptr(full_field_name))
-        elif (ct.kind == tk.CONSTANTARRAY and
-              ct.get_array_element_type().kind == tk.CHAR_S):
-            tmp_ptr = _mangle_ptr(full_field_name);
-            STMT('char *{0} = NULL;'.format(tmp_ptr))
-            ptrs(tmp_ptr, ct.get_array_size())
-            unpack("s:s,", _quoted_field_name, ptr(tmp_ptr))
-        else:
-            embed()
+        return recursively__generate_field_parser(s, mod, out, unpack, add_ptr, add_array)
+
+    raise CantParse(s.spelling)
+
+def _safe_allocation(stmt, allocated_type, allocated_ptr, allocation_size, cleanups, create_local_var = True):
+    base_fmt = '{1} = ({0})malloc({2})'
+    if create_local_var:
+        fmt = '{0} ' + base_fmt
+    else:
+        fmt = base_fmt;
+    stmt(fmt.format(allocated_type, allocated_ptr, allocation_size))
+    if not cleanups:
+        goto_expr = 'goto exit'
+    else:
+        goto_expr = 'goto ' + cleanups[-1].label
+    stmt('if (NULL == {0}) {1}'.format(allocated_ptr, goto_expr))
+    cleanups.append(
+        CleanupInfo('free({0})'.format(allocated_ptr),
+                    _normalize_labelname(allocated_ptr + '_cleanup')))
+
+def _generate_cleanups(stmt, block, cleanups):
+    if not cleanups:
+        return
+
+    del cleanups[-1]
+    for cleanup in cleanups[::-1]:
+        stmt(cleanup.label + ':', suffix = '')
+        stmt(cleanup.expression)
+
+def _generate_var_array_parser(C_STMT, C_BLOCK, arrays, cleanups):
+    for array_ptr, array_type in arrays:
+        array_ptr_size = array_ptr + '_size'
+        array_ptr_buffer = array_ptr + '_buffer'
+        struct_type = array_type.get_pointee().get_pointee().spelling
+        struct_decl = array_type.get_pointee().get_pointee().get_declaration()
+        with C_BLOCK('if (!json_is_array({0}))'.format(array_ptr)):
+            C_STMT('return -1');
+
+        ptr = _demangle_ptr(array_ptr)
+        C_STMT('int {0} = json_array_size({1})'.format(array_ptr_size, array_ptr))
+        _safe_allocation(C_STMT, struct_type + '*', array_ptr_buffer,
+                         'sizeof({0}) * {1}'.format(struct_type, array_ptr_size), cleanups,
+                         create_local_var = True)
+        _safe_allocation(C_STMT, struct_type + '**', ptr, 'sizeof(intptr_t) * {0} + 1'.format(array_ptr_size),
+                         cleanups, create_local_var = False)
+        with C_BLOCK('for (int i = 0; i < {0}; i++)'.format(array_ptr_size)):
+            C_STMT('rc = {0}(json_array_get({1}, i), &{2}[i])'.format(struct_parser_function_name(struct_decl),
+                                                                      array_ptr, array_ptr_buffer))
+            with C_BLOCK('if (0 != rc)'):
+                C_STMT('goto {0}'.format(cleanups[0].label))
+
+                C_STMT('{0}[i] = &{1}[i]'.format(ptr, array_ptr_buffer))
+
+            C_STMT('{0}[{1}] = NULL'.format(ptr, array_ptr_size))
+
+    C_STMT('goto exit');
+    _generate_cleanups(C_STMT, C_BLOCK, cleanups)
+
+
+def _generate_free_implementation(s, h_module, C_BLOCK, C_STMT, function_name):
+    fields = [f
+              for f in s.get_children()
+              if f.kind == ck.FIELD_DECL]
+
+    with C_BLOCK(function_name):
+        for f in fields:
+            if _is_var_array(f.type.get_canonical()):
+                C_STMT('free(*this->{0})'.format(f.displayname))
+                C_STMT('free(this->{0})'.format(f.displayname))
+            if f.type.get_canonical().kind == tk.RECORD and _is_struct_jsonable(f.type.get_canonical().get_declaration()):
+                C_STMT('{0}(&this->{1})'.format(struct_free_function_name(f), f.displayname))
 
 def _generate_parser(main_filename, s, c_module, h_module):
     function_name = 'int {0}(json_t *json, struct {1} *out)'.format(struct_parser_function_name(s),
                                                                     s.displayname)
+    free_function_name = 'void {0}(struct {1} *this)'.format(struct_free_function_name(s),
+                                                             s.displayname)
 
-    h_module.stmt(function_name);
+
+    C_STMT = c_module.stmt
+    C_BLOCK = c_module.block
+
+    h_module.stmt(function_name)
+    h_module.stmt(free_function_name)
     if s.location.file.name != main_filename:
         return
 
-    with c_module.block(function_name):
+    with C_BLOCK(function_name):
         unpack_str = []
         destinations = []
-        tmp_str_ptrs = []
+        str_ptrs = []
+        arrays = []
+        cleanups = []
         def unpack(fmt, *to):
             unpack_str.append(fmt)
             destinations.extend(list(to))
 
-        def ptrs(ptr_name, buffer_size):
-            tmp_str_ptrs.append((ptr_name, buffer_size))
+        def add_array(array_json_name, array_type):
+            arrays.append((array_json_name, array_type))
 
-        recursively__generate_parser(s, c_module, "out->", unpack, ptrs)
+        def add_ptr(ptr_name, buffer_size):
+            str_ptrs.append((ptr_name, buffer_size))
+
+        recursively__generate_parser(s, c_module, "out->", unpack, add_ptr, add_array)
         function_body = 'json_unpack(json, {0}, {1})'.format('"' + ''.join(unpack_str).replace(",}","}") + '"'
                                                             , ', '.join(destinations))
-        c_module.stmt("int rc = {0}".format(function_body))
-        c_module.stmt('if (0 != rc) { return rc;}')
-        for tmp_str_ptr, buffer_size in tmp_str_ptrs:
-            ptr = _demangle_ptr(tmp_str_ptr)
-            c_module.stmt('strncpy({0}, {1}, {2});'.format(ptr, tmp_str_ptr, buffer_size - 1))
+        C_STMT("int rc = {0}".format(function_body))
+        C_STMT('if (0 != rc) { return rc;}')
+        for str_ptr, buffer_size in str_ptrs:
+            ptr = _demangle_ptr(str_ptr)
+            C_STMT('strncpy({0}, {1}, {2})'.format(ptr, str_ptr, buffer_size - 1))
 
-        c_module.stmt('return 0');
+        _generate_var_array_parser(C_STMT, C_BLOCK, arrays, cleanups)
+        C_STMT('exit:', suffix = '')
+        C_STMT('return rc')
+
+    _generate_free_implementation(s, h_module, C_BLOCK, C_STMT, free_function_name)
 
 
 def _generate_serializer(main_filename, s, c_module, h_module):
@@ -235,6 +418,7 @@ def _init_h_module(input, h_file):
     m.stmt('#define {0}'.format(h_name), suffix = '')
     includes = ["<jansson.h>",
                 "<string.h>",
+                "<stdint.h>",
                 _quote(input)]
 
     for include in includes:
