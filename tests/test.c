@@ -82,10 +82,73 @@ void var_lists(void)
     CU_ASSERT(i == ARRAY_LENGTH(ss));
 }
 
+#define NESTED_COUNT (3)
+#define BASE_INTEGER 100
+void nested_var_list(void)
+{
+    struct scalars base;
+    struct scalars ss[2 * NESTED_COUNT];
+    struct scalars *scalar_ptrs[NESTED_COUNT][3] = {{&ss[0], &ss[1], NULL},
+                                                    {&ss[2], &ss[3], NULL},
+                                                    {&ss[4], &ss[5], NULL}};
+    generate_scalars(ss, ARRAY_LENGTH(ss), &base);
+    struct var_list vars[] = {
+        {.i = BASE_INTEGER, .s = scalar_ptrs[0]},
+        {.i = BASE_INTEGER + 1, .s = scalar_ptrs[1]},
+        {.i = BASE_INTEGER + 2, .s = scalar_ptrs[2]}
+    };
+
+    struct var_list *var_list_ptrs[ARRAY_LENGTH(vars) + 1];
+    for (int i = 0; i < ARRAY_LENGTH(vars); i++) {
+        var_list_ptrs[i] = &vars[i];
+    }
+
+    var_list_ptrs[ARRAY_LENGTH(var_list_ptrs) - 1] = NULL;
+
+    struct nested_var_list nested = {
+        .s = var_list_ptrs,
+        .a = BASE_INTEGER
+    };
+
+    json_t *json = nested_var_list_to_json(&nested);
+    struct nested_var_list nested_from_json;
+    int rc = nested_var_list_from_json(json, &nested_from_json);
+    CU_ASSERT(0 == rc);
+    int i;
+    int j;
+    for (i = 0; nested_from_json.s[i] != NULL; i++) {
+        for (j = 0; nested_from_json.s[i]->s[j] != NULL; j++) {
+            CU_ASSERT(nested_from_json.s[i]->s[j]->a == base.a + (i * 2)  + j);
+        }
+
+        CU_ASSERT(j == 2);
+    }
+
+    CU_ASSERT(i == ARRAY_LENGTH(var_list_ptrs) - 1);
+    nested_var_list_free(&nested_from_json);
+}
+
+#define VAR_STRING "bla bla boy asfslkdafjasfdlkj asfdalkfdsj pwqerrwgf0"
+void var_string(void)
+{
+    struct var_string s = {.a = 300,
+                           .s = "hello"};
+
+    struct var_string s_from_json;
+    json_t *json = var_string_to_json(&s);
+    int rc = var_string_from_json(json, &s_from_json);
+    CU_ASSERT(0 == rc);
+    CU_ASSERT(s.a == s_from_json.a);
+    CU_ASSERT(strcmp(s.s, s_from_json.s) == 0);
+    var_string_free(&s_from_json);
+}
+
 void register_tests(CU_pSuite suite)
 {
     ADD_TEST("scalars", scalars);
     ADD_TEST("var_lists", var_lists);
+    ADD_TEST("var_string", var_string);
+    ADD_TEST("nested_var_list", nested_var_list);
 }
 
 int main(int argc, char **argv)

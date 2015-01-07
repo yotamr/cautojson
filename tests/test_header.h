@@ -19,3 +19,15 @@ struct var_list {
     struct scalars **s;
     JSONABLE;
 };
+
+struct var_string {
+    int a;
+    char *s;
+    JSONABLE;
+};
+
+struct nested_var_list {
+    struct var_list **s;
+    int a;
+    JSONABLE;
+};

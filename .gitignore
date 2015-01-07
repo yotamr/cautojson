@@ -1,1 +1,3 @@
 *.pyc
+tests/*auto.*
+tests/test

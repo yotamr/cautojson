@@ -80,8 +80,16 @@ def _is_var_array(t):
     sd = pointee.get_declaration()
     return _is_struct_jsonable(sd)
 
+def _is_static_string(t):
+    return (t.kind == tk.CONSTANTARRAY and
+    t.get_array_element_type().kind == tk.CHAR_S)
+
 def _is_var_string(t):
-    return False
+    t = t.get_canonical()
+    if t.kind != tk.POINTER:
+        return False
+
+    return t.get_pointee().kind == tk.CHAR_S
 
 def _get_jsonable_structs(root, h_file):
     jsonables = {}
@@ -92,7 +100,6 @@ def _get_jsonable_structs(root, h_file):
 
         for node in node.get_children():
             aux(node)
-
 
         return jsonables
 
@@ -145,6 +152,9 @@ def _serialize_record_array(s, sd, full_field_name, loop_fmt, lvalue_modifier, m
 
     return array_name
 
+def _serialize_string(s, ct, full_field_name, mod):
+    return "json_string({0})".format(full_field_name)
+
 def _serialize_record_static_array(s, ct, full_field_name, mod):
     loop_fmt = 'for (int i = 0; i < sizeof({0}) / sizeof({0}[0]); i++)'
     return _serialize_record_array(s, ct.get_array_element_type().get_canonical(), full_field_name, loop_fmt, '&', mod)
@@ -162,7 +172,7 @@ def _handle_array_serialization(s, ct, full_field_name, mod):
     if element_type_kind == tk.RECORD:
         raise NotImplemented()
     elif element_type_kind == tk.CHAR_S:
-        return "json_string({0})".format(full_field_name)
+        return _serialize_string(s, ct, full_field_name, mod)
 
 def recursively__generate_serializer(s, mod):
     BLOCK = mod.block
@@ -196,7 +206,7 @@ def recursively__generate_serializer(s, mod):
         elif _is_var_array(ct):
             field_value = _serialize_record_var_array(s, ct, full_field_name, mod)
         elif _is_var_string(ct):
-            print ct
+            field_value = _serialize_string(s, ct, full_field_name, mod)
         else:
             raise CantSerializeField(s.displayname, ct.kind)
 
@@ -251,11 +261,11 @@ def recursively__generate_field_parser(s, mod, out, unpack, add_ptr, add_array):
         unpack(", ")
     elif ct.kind == tk.INT or ct.kind == tk.ENUM:
         unpack("s:i,", _quoted_field_name, ptr(full_field_name))
-    elif (ct.kind == tk.CONSTANTARRAY and
-          ct.get_array_element_type().kind == tk.CHAR_S):
+    elif _is_var_string(ct) or _is_static_string(ct):
+        is_var = _is_var_string(ct)
         tmp_ptr = _mangle_ptr(full_field_name)
-        STMT('char *{0} = NULL;'.format(tmp_ptr))
-        add_ptr(tmp_ptr, ct.get_array_size())
+        STMT('char *{0} = NULL'.format(tmp_ptr))
+        add_ptr(tmp_ptr, ct.get_array_size(), is_var)
         unpack("s:s,", _quoted_field_name, ptr(tmp_ptr))
     elif (ct.kind == tk.CONSTANTARRAY and
           ct.get_array_element_type().get_canonical().kind == tk.RECORD):
@@ -329,9 +339,9 @@ def _generate_var_array_parser(C_STMT, C_BLOCK, arrays, cleanups):
             with C_BLOCK('if (0 != rc)'):
                 C_STMT('goto {0}'.format(cleanups[0].label))
 
-                C_STMT('{0}[i] = &{1}[i]'.format(ptr, array_ptr_buffer))
+            C_STMT('{0}[i] = &{1}[i]'.format(ptr, array_ptr_buffer))
 
-            C_STMT('{0}[{1}] = NULL'.format(ptr, array_ptr_size))
+        C_STMT('{0}[{1}] = NULL'.format(ptr, array_ptr_size))
 
     C_STMT('goto exit');
     _generate_cleanups(C_STMT, C_BLOCK, cleanups)
@@ -344,11 +354,19 @@ def _generate_free_implementation(s, h_module, C_BLOCK, C_STMT, function_name):
 
     with C_BLOCK(function_name):
         for f in fields:
-            if _is_var_array(f.type.get_canonical()):
-                C_STMT('free(*this->{0})'.format(f.displayname))
+            if _is_var_string(f.type.get_canonical()):
                 C_STMT('free(this->{0})'.format(f.displayname))
             if f.type.get_canonical().kind == tk.RECORD and _is_struct_jsonable(f.type.get_canonical().get_declaration()):
                 C_STMT('{0}(&this->{1})'.format(struct_free_function_name(f), f.displayname))
+            if _is_var_array(f.type.get_canonical()):
+                sd = f.type.get_canonical().get_pointee().get_pointee().get_declaration()
+                with C_BLOCK('for (int ___i = 0; this->{0}[___i] != NULL; ___i++)'.format(f.displayname)):
+                    C_STMT('{0}(this->{1}[___i])'.format(struct_free_function_name(sd), f.displayname))
+
+                C_STMT('free(*this->{0})'.format(f.displayname))
+                C_STMT('free(this->{0})'.format(f.displayname))
+
+
 
 def _generate_parser(main_filename, s, c_module, h_module):
     function_name = 'int {0}(json_t *json, struct {1} *out)'.format(struct_parser_function_name(s),
@@ -378,17 +396,20 @@ def _generate_parser(main_filename, s, c_module, h_module):
         def add_array(array_json_name, array_type):
             arrays.append((array_json_name, array_type))
 
-        def add_ptr(ptr_name, buffer_size):
-            str_ptrs.append((ptr_name, buffer_size))
+        def add_ptr(ptr_name, buffer_size, is_var):
+            str_ptrs.append((ptr_name, buffer_size, is_var))
 
         recursively__generate_parser(s, c_module, "out->", unpack, add_ptr, add_array)
         function_body = 'json_unpack(json, {0}, {1})'.format('"' + ''.join(unpack_str).replace(",}","}") + '"'
                                                             , ', '.join(destinations))
         C_STMT("int rc = {0}".format(function_body))
         C_STMT('if (0 != rc) { return rc;}')
-        for str_ptr, buffer_size in str_ptrs:
+        for str_ptr, buffer_size, is_var in str_ptrs:
             ptr = _demangle_ptr(str_ptr)
-            C_STMT('strncpy({0}, {1}, {2})'.format(ptr, str_ptr, buffer_size - 1))
+            if is_var:
+                C_STMT('{0} = strdup({1})'.format(ptr, str_ptr))
+            else:
+                C_STMT('strncpy({0}, {1}, {2})'.format(ptr, str_ptr, buffer_size - 1))
 
         _generate_var_array_parser(C_STMT, C_BLOCK, arrays, cleanups)
         C_STMT('exit:', suffix = '')
@@ -406,9 +427,6 @@ def _generate_serializer(main_filename, s, c_module, h_module):
 
     with c_module.block(function_name):
         recursively__generate_serializer(s, c_module)
-
-
-
 
 
 def _init_h_module(input, h_file):
