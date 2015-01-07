@@ -429,18 +429,26 @@ def _generate_serializer(main_filename, s, c_module, h_module):
         recursively__generate_serializer(s, c_module)
 
 
+def _add_include(module, filename):
+    module.stmt('#include {0}'.format(filename), suffix = '')
+
+def _add_base_includes(module):
+    includes = ["<jansson.h>",
+                "<string.h>",
+                "<stdint.h>"]
+
+    module.stmt('char *strdup(const char *s)')
+    for include in includes:
+        _add_include(module, include)
+
 def _init_h_module(input, h_file):
     m = Module()
     h_name = '__{0}_JSON_AUTO__'.format(os.path.basename(input).replace('.', '_').upper())
     m.stmt('#ifndef {0}'.format(h_name), suffix = '')
     m.stmt('#define {0}'.format(h_name), suffix = '')
-    includes = ["<jansson.h>",
-                "<string.h>",
-                "<stdint.h>",
-                _quote(input)]
+    _add_base_includes(m)
+    _add_include(m, _quote(input))
 
-    for include in includes:
-        m.stmt('#include {0}'.format(include), suffix = '')
 
     return m, h_name
 
@@ -452,6 +460,7 @@ def _init_c_module(input, h_output):
     m = Module()
     m.stmt('#include "{0}"'.format(input), suffix = '')
     m.stmt('#include "{0}"'.format(h_output), suffix = '')
+    _add_base_includes(m)
 
     return m
 
