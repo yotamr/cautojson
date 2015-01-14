@@ -11,6 +11,7 @@ struct scalars {
     int a;
     enum some_enum e;
     char string[500];
+    long long l;
     JSONABLE;
 };
 

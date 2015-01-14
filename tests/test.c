@@ -21,10 +21,12 @@ static void register_suite(CU_pSuite *suite, const char *name)
     assert(NULL != *suite);
 }
 
+#define LONG_NUM (1L << 44)
 void scalars(void)
 {
     struct scalars s = {.a = 500,
                         .e = ENUM_VAL_2,
+                        .l = LONG_NUM,
                         .string = {"hello"}};
     struct scalars s_from_json;
 
@@ -32,6 +34,7 @@ void scalars(void)
     CU_ASSERT(0 == scalars_from_json(json, &s_from_json));
     CU_ASSERT(500 == s_from_json.a);
     CU_ASSERT(ENUM_VAL_2 == s_from_json.e);
+    CU_ASSERT(LONG_NUM == s_from_json.l);
     CU_ASSERT(strcmp(s.string, s_from_json.string) == 0);
 }
 

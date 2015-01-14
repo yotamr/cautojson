@@ -144,6 +144,7 @@ def _serialize_record_array(s, sd, full_field_name, loop_fmt, lvalue_modifier, m
     array_name = _mangle_ptr(full_field_name) + "_array"
     STMT('json_t *{0} = json_array()'.format(array_name))
     struct_serializer_func = struct_serializer_function_name(sd.get_declaration())
+    loop_fmt = 'if (NULL != {0}) ' + loop_fmt
     with BLOCK(loop_fmt.format(full_field_name)):
         STMT('json_array_append_new({0}, {1}({2}{3}[i]))'.format(array_name,
                                                              struct_serializer_func,
@@ -174,6 +175,7 @@ def _handle_array_serialization(s, ct, full_field_name, mod):
     elif element_type_kind == tk.CHAR_S:
         return _serialize_string(s, ct, full_field_name, mod)
 
+_numeric_kinds = [tk.INT, tk.ENUM, tk.LONG, tk.LONGLONG]
 def recursively__generate_serializer(s, mod):
     BLOCK = mod.block
     STMT = mod.stmt
@@ -199,7 +201,7 @@ def recursively__generate_serializer(s, mod):
         if ct.kind == tk.RECORD:
             sd = ct.get_declaration()
             field_value = '{0}(&{1})'.format(struct_serializer_function_name(sd), full_field_name)
-        elif ct.kind == tk.INT or ct.kind == tk.ENUM:
+        elif ct.kind in _numeric_kinds:
             field_value = "json_integer({0})".format(full_field_name)
         elif ct.kind == tk.CONSTANTARRAY:
             field_value = _handle_array_serialization(s, ct, full_field_name, mod)
@@ -244,6 +246,10 @@ def recursively__generate_struct_parser(s, mod, out, unpack, add_ptr, add_array)
             recursively__generate_parser(f, mod, out, unpack, add_ptr, add_array)
         unpack("}")
 
+_num_type_to_unpack_fmt = {tk.LONGLONG : 'I',
+                     tk.LONG : 'I',
+                     tk.INT : 'i',
+                     tk.ENUM : 'i'}
 def recursively__generate_field_parser(s, mod, out, unpack, add_ptr, add_array):
     STMT = mod.stmt
     BLOCK = mod.block
@@ -259,8 +265,8 @@ def recursively__generate_field_parser(s, mod, out, unpack, add_ptr, add_array):
         unpack("s:", _quoted_field_name)
         recursively__generate_parser(sd, mod, full_field_name + ".", unpack, add_ptr, add_array)
         unpack(", ")
-    elif ct.kind == tk.INT or ct.kind == tk.ENUM:
-        unpack("s:i,", _quoted_field_name, ptr(full_field_name))
+    elif ct.kind in _numeric_kinds:
+        unpack("s:{0},".format(_num_type_to_unpack_fmt[ct.kind]), _quoted_field_name, ptr(full_field_name))
     elif _is_var_string(ct) or _is_static_string(ct):
         is_var = _is_var_string(ct)
         tmp_ptr = _mangle_ptr(full_field_name)
@@ -400,10 +406,11 @@ def _generate_parser(main_filename, s, c_module, h_module):
             str_ptrs.append((ptr_name, buffer_size, is_var))
 
         recursively__generate_parser(s, c_module, "out->", unpack, add_ptr, add_array)
-        function_body = 'json_unpack(json, {0}, {1})'.format('"' + ''.join(unpack_str).replace(",}","}") + '"'
+        C_STMT('json_error_t json_err')
+        function_body = 'json_unpack_ex(json, &json_err, 0, {0}, {1})'.format('"' + ''.join(unpack_str).replace(",}","}") + '"'
                                                             , ', '.join(destinations))
         C_STMT("int rc = {0}".format(function_body))
-        C_STMT('if (0 != rc) { return rc;}')
+        C_STMT(r'if (0 != rc) { fprintf(stderr, "json_unpack_ex error: %s\n", json_err.text); return rc;}')
         for str_ptr, buffer_size, is_var in str_ptrs:
             ptr = _demangle_ptr(str_ptr)
             if is_var:
